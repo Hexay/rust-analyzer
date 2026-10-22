@@ -48,7 +48,6 @@ pub struct FulfillmentCtxt<'db> {
     /// gets rolled back. Because of this we explicitly check that we only
     /// use the context in exactly this snapshot.
     usable_in_snapshot: usize,
-    try_evaluate_obligations_scratch: PendingObligations<'db>,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -127,7 +126,6 @@ impl<'db> FulfillmentCtxt<'db> {
         FulfillmentCtxt {
             obligations: Default::default(),
             usable_in_snapshot: infcx.num_open_snapshots(),
-            try_evaluate_obligations_scratch: Default::default(),
         }
     }
 }
@@ -169,24 +167,23 @@ impl<'db> FulfillmentCtxt<'db> {
         infcx: &InferCtxt<'db>,
     ) -> Vec<NextSolverError<'db>> {
         assert_eq!(self.usable_in_snapshot, infcx.num_open_snapshots());
-        self.try_evaluate_obligations_scratch.clear();
         let mut errors = Vec::new();
         loop {
             let mut any_changed = false;
-            self.try_evaluate_obligations_scratch.extend(self.obligations.drain_pending(|_| true));
-            for (mut obligation, stalled_on) in self.try_evaluate_obligations_scratch.drain(..) {
-                if obligation.recursion_depth >= infcx.interner.recursion_limit() {
-                    self.obligations.on_fulfillment_overflow(infcx);
-                    // Only return true errors that we have accumulated while processing.
-                    return errors;
+            let mut overflowed = false;
+            // Processed in place so obligations that stay pending keep their order without being moved.
+            self.obligations.pending.retain_mut(|(obligation, stalled_on)| {
+                // Obligations after an overflowing one are dropped unprocessed.
+                if overflowed || obligation.recursion_depth >= infcx.interner.recursion_limit() {
+                    overflowed = true;
+                    return false;
                 }
 
-                if let Some(stalled) = &stalled_on
+                if let Some(stalled) = stalled_on
                     && !infcx.has_obligation_inspector()
                     && is_still_stalled(infcx, stalled)
                 {
-                    self.obligations.register(obligation, stalled_on);
-                    continue;
+                    return true;
                 }
 
                 let goal = obligation.as_goal();
@@ -194,28 +191,25 @@ impl<'db> FulfillmentCtxt<'db> {
                 if let Some(certainty) =
                     delegate.compute_goal_fast_path(goal, obligation.cause.span())
                 {
-                    match certainty {
-                        Certainty::Yes => {}
-                        Certainty::Maybe { .. } => {
-                            self.obligations.register(obligation, None);
-                        }
-                    }
-                    continue;
+                    *stalled_on = None;
+                    return matches!(certainty, Certainty::Maybe { .. });
                 }
 
-                let result = delegate.evaluate_root_goal(goal, obligation.cause.span(), stalled_on);
-                infcx.inspect_evaluated_obligation(&obligation, &result, || {
+                let result =
+                    delegate.evaluate_root_goal(goal, obligation.cause.span(), stalled_on.take());
+                infcx.inspect_evaluated_obligation(obligation, &result, || {
                     Some(
                         delegate.evaluate_root_goal_for_proof_tree(goal, obligation.cause.span()).1,
                     )
                 });
-                let GoalEvaluation { goal: _, certainty, has_changed, stalled_on } = match result {
-                    Ok(result) => result,
-                    Err(NoSolution) => {
-                        errors.push(NextSolverError::TrueError(obligation));
-                        continue;
-                    }
-                };
+                let GoalEvaluation { goal: _, certainty, has_changed, stalled_on: new_stalled_on } =
+                    match result {
+                        Ok(result) => result,
+                        Err(NoSolution) => {
+                            errors.push(NextSolverError::TrueError(obligation.clone()));
+                            return false;
+                        }
+                    };
 
                 if has_changed == HasChanged::Yes {
                     // We increment the recursion depth here to track the number of times
@@ -228,12 +222,15 @@ impl<'db> FulfillmentCtxt<'db> {
                     any_changed = true;
                 }
 
-                match certainty {
-                    Certainty::Yes => {}
-                    Certainty::Maybe { .. } => self.obligations.register(obligation, stalled_on),
-                }
-            }
+                *stalled_on = new_stalled_on;
+                matches!(certainty, Certainty::Maybe { .. })
+            });
 
+            if overflowed {
+                self.obligations.on_fulfillment_overflow(infcx);
+                // Only return true errors that we have accumulated while processing.
+                return errors;
+            }
             if !any_changed {
                 break;
             }
