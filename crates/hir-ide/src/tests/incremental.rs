@@ -613,6 +613,7 @@ fn main() {
                 "AttrFlags::query_",
                 "GenericPredicates::query_with_diagnostics_",
                 "InherentImpls < 'db >::for_crate_",
+                "TraitImpls < 'db >::for_trait_in_crate_and_deps_",
                 "TraitImpls < 'db >::for_crate_and_deps_",
                 "TraitImpls < 'db >::for_crate_",
                 "impl_trait_with_diagnostics",

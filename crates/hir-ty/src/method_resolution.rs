@@ -715,6 +715,20 @@ impl<'db> TraitImpls<'db> {
     pub fn for_crate_and_deps(db: &'db dyn HirDatabase, krate: Crate) -> Box<[Arc<Self>]> {
         krate.transitive_deps(db).iter().map(|&dep| Self::for_crate(db, dep).clone()).collect()
     }
+
+    /// [`Self::for_crate_and_deps`] narrowed to the crates that implement `trait_`, in the same order.
+    #[salsa::tracked(returns(deref))]
+    pub fn for_trait_in_crate_and_deps(
+        db: &'db dyn HirDatabase,
+        krate: Crate,
+        trait_: TraitId,
+    ) -> Box<[Arc<Self>]> {
+        Self::for_crate_and_deps(db, krate)
+            .iter()
+            .filter(|impls| impls.map.contains_key(&trait_))
+            .cloned()
+            .collect()
+    }
 }
 
 impl<'db> TraitImpls<'db> {
@@ -850,6 +864,7 @@ impl<'db> TraitImpls<'db> {
     pub fn for_each_crate_and_block<R: VisitorResult>(
         db: &'db dyn HirDatabase,
         krate: Crate,
+        trait_: TraitId,
         block: Option<BlockIdLt<'db>>,
         for_each: &mut dyn FnMut(&TraitImpls<'db>) -> R,
     ) -> R {
@@ -857,7 +872,7 @@ impl<'db> TraitImpls<'db> {
         for impl_ in blocks.filter_map(|block| Self::for_block(db, block)) {
             try_visit!(for_each(impl_));
         }
-        for impl_ in Self::for_crate_and_deps(db, krate) {
+        for impl_ in Self::for_trait_in_crate_and_deps(db, krate, trait_) {
             try_visit!(for_each(impl_));
         }
         R::output()
@@ -867,11 +882,12 @@ impl<'db> TraitImpls<'db> {
     pub fn for_each_crate_and_block_trait_and_type<R: VisitorResult>(
         db: &'db dyn HirDatabase,
         krate: Crate,
+        trait_: TraitId,
         type_block: Option<BlockIdLt<'db>>,
         trait_block: Option<BlockIdLt<'db>>,
         for_each: &mut dyn FnMut(&TraitImpls<'db>) -> R,
     ) -> R {
-        let in_self_and_deps = TraitImpls::for_crate_and_deps(db, krate);
+        let in_self_and_deps = TraitImpls::for_trait_in_crate_and_deps(db, krate, trait_);
         for impl_ in in_self_and_deps {
             try_visit!(for_each(impl_));
         }

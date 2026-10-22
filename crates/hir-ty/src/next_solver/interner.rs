@@ -1633,6 +1633,7 @@ impl<'db> Interner for DbInterner<'db> {
             TraitImpls::for_each_crate_and_block_trait_and_type(
                 self.db,
                 krate,
+                trait_def_id.0,
                 type_block,
                 trait_block,
                 &mut |impls| {
@@ -1757,7 +1758,7 @@ impl<'db> Interner for DbInterner<'db> {
         };
         let block = trait_def_id.0.loc(self.db).container.block(self.db);
 
-        TraitImpls::for_each_crate_and_block(self.db, krate, block, &mut |impls| {
+        TraitImpls::for_each_crate_and_block(self.db, krate, trait_def_id.0, block, &mut |impls| {
             for &impl_ in impls.blanket_impls(trait_def_id.0) {
                 try_visit!(f(impl_.into()));
             }
